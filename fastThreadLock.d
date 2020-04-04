@@ -1,10 +1,10 @@
 import core.thread;
+import core.time;
 
 enum Platform
 {
     Unsupported,
 
-    X86,
     X86_64,
 
 }
@@ -44,8 +44,6 @@ string LockQueue(string lock, string retval = null)
     static assert(is(typeof(` ~ lock ~ `) == uint), "can only lock on uint");
     {
     enum lbl = mixin("\"L" ~ __LINE__.stringof ~ "\"");
-    pragma(msg, lbl);
-    printf("Locking Queue at  %s\n", lbl.ptr);
     enum lockName = "` ~ lock ~ `";
     uint* lockPtr = &` ~lock ~ `;
     version (linux)
@@ -116,14 +114,14 @@ extern (C) void* copyLoop(void* arg)
 {
     import core.stdc.string;
     import core.stdc.stdio;
-    printf("starting copyLoop");
+//    printf("starting copyLoop\n");
     size_t nextCopyItem = 0;
     for(;;)
     {
         assert(copyQueueCount < 192); // we are getting to close the limit
         if (copyQueueCount > 32 && !copyQueueLocked)
         {
-//            mixin(LockQueue("copyQueueLocked"));
+            mixin(LockQueue("copyQueueLocked"));
 
             // not a foreach because the optimizer can't see the limit
             // due to lowering :/
@@ -142,7 +140,6 @@ extern (C) void* copyLoop(void* arg)
                 memcpy(e3.dest, e3.source, e3.size);
                 memcpy(e4.dest, e4.source, e4.size);
 
-                copyQueueCount -= 4;
                 workDoneCount += 4;
             }
             goto LsmallCopy;
@@ -152,18 +149,24 @@ extern (C) void* copyLoop(void* arg)
         mixin(readFence);
         if (copyQueueCount && !copyQueueLocked)
         {
-//            mixin(LockQueue("copyQueueLocked"));
+            mixin(LockQueue("copyQueueLocked"));
         LsmallCopy:
-            for(int i = 0; i < copyQueueCount; i++)
+            for( ; copyQueueCount;)
             {
                 auto e1 = copyQueue[nextCopyItem++];
                 memcpy(e1.dest, e1.source, e1.size);
                 workDoneCount++;
+                copyQueueCount--;
             }
+        }
+        else if (!copyQueueLocked && !copyQueueCount)
+        {
+            // printf("No work to be done\n");
+            Thread.sleep(msecs(100));
         }
     LCopyfinished:
         mixin(writeFence);
-//        mixin(UnlockQueue("copyQueueLocked"));
+        mixin(UnlockQueue("copyQueueLocked"));
         // non critical
         nextCopyItem = 0;
         mixin(__mmPause);
@@ -193,26 +196,23 @@ static string enqueueCopyString(string dest, string source, string size, string 
     string result =
 "
 do {
-   printf(`pushing into the copy Queue\n`);
     auto entry = CopyQueueEntry(
         " ~ dest ~ ",
         " ~ source ~ ",
         " ~ size ~ "
     );
-    printf(\"copyQueueLocked: %d, copyQueueCount: %d\n\", copyQueueLocked, copyQueueCount);
     if ((!copyQueueLocked) && copyQueueCount < 192) {
-    printf(\"copyQueueLocked: %d going to lock copyQueue\n\", copyQueueLocked);
 
         " ~ LockQueue("copyQueueLocked") ~ "
         // when we reach this point the lock has been aquired.
-        printf(\"lock aquired\");
         " ~ (waitHandle !is null ?  waitHandle ~ " = copyQueueCount;" : "") ~ "
 
         copyQueue[copyQueueCount++] = entry;
         " ~ UnlockQueue("copyQueueLocked") ~ "
     }
-    else " ~ __mmPause ~ "
-    continue;
+    else { 
+        " ~ __mmPause ~ "
+        continue; }
 } while (0);
 ";
 
@@ -222,15 +222,21 @@ do {
 void main()
 {
     assert(!copyQueueLocked);
-    foreach(_; 0 .. 2) printf("GetThreadId: %d\n", GetThreadId());
-    // initWorkerThread();
-//    pragma(msg, LockQueue("copyQueueLocked", "owner"));
+    printf("GetThreadId: %d\n", GetThreadId());
+    initWorkerThread();
     uint owner;
     printf("copyQueueLocked: %d\n", copyQueueLocked);
     mixin(LockQueue("copyQueueLocked", "owner"));
+    // we've got the lock which means we're the owner
     printf("My thread Id:%d\n", owner);
-    assert(copyQueueLocked);
+    mixin(UnlockQueue("copyQueueLocked"));
     long source = 22;
     long dest = 0;
     size_t wait_handle;
+    mixin(enqueueCopyString("&dest", "&source", "ulong.sizeof", "wait_handle"));
+    while (workDoneCount <= wait_handle)
+    {
+        mixin(__mmPause);
+    }
+    assert(dest == source);
 }
