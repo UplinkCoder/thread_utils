@@ -141,6 +141,7 @@ extern (C) void* copyLoop(void* arg)
                 memcpy(e4.dest, e4.source, e4.size);
 
                 workDoneCount += 4;
+				copyQueueCount -= 4;
             }
             goto LsmallCopy;
 
