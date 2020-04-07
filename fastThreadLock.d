@@ -1,22 +1,15 @@
 import core.thread;
 import core.time;
 
-enum Platform
-{
-    Unsupported,
-
-    X86_64,
-
-}
-
 version (linux)
 {
-    import core.sys.posix.pthread;
+    version (X86_64)
+    {
+//        alias x86_64_asm_linux_lock = void;
+    }
 }
-else
-{
-    static assert(0, "Platform unsupported");
-}
+
+
 immutable string readFence = ``;
 immutable string writeFence = ``;
 
@@ -24,31 +17,31 @@ immutable string writeFence = ``;
 extern(C) uint GetThreadId()
 {
     asm nothrow {
+                naked;
                 db 0x64,  0x48, 0x8b, 0x0c, 0x25, 0x00, 0x00, 0x00, 0x00;
                 // mov RCX, qword ptr FS:0x0; But dmds iasm cannot do that :(
                 // rcx = thread_id
 
                 shr RCX, 8;
                 mov RAX, RCX;
+                ret;
     }
 }
 
 /// NOTE: I am aware how this function looks,
 /// Given the tools I have (buggy iasm) this the best
-string LockQueue(string lock, string retval = null)
+string LockQueue(string lock)
 {
     assert(__ctfe);
     return
-        (retval ? `static assert(is(typeof(` ~ retval ~ `) == uint), "retval has to be a uint");` : ``) ~
 `
-    static assert(is(typeof(` ~ lock ~ `) == uint), "can only lock on uint");
-    {
+    static assert(is(typeof(` ~ lock ~ `) == shared uint), "can only lock on uint");
+{
     enum lbl = mixin("\"L" ~ __LINE__.stringof ~ "\"");
     enum lockName = "` ~ lock ~ `";
-    uint* lockPtr = &` ~lock ~ `;
-    version (linux)
+    auto lockPtr = &` ~lock ~ `;
+    static if (is(x86_64_asm_linux_lock))
     {
-        version (X86_64)
         {
             asm nothrow
             {
@@ -69,23 +62,35 @@ string LockQueue(string lock, string retval = null)
                 mov RDX, [lockPtr]; // load ptr
                 lock; cmpxchg dword ptr [RDX], ECX; // xchg()
                 // xchg the lock value
-             " ~
-            ` ~ (retval ? `"mov ` ~ retval ~ `, EAX;"` : `""`) ~ `
-            ~ "je " ~ lbl ~ ";
+
+                je " ~ lbl ~ ";
                 // this code is eqivalent to
-                // if (lock == 0) { lock = thread_id; retval = lock; }
-                // else { retval = lock }
+                // if (lock == 0) { lock = thread_id; }
                 pop RDX;
                 pop RCX;
                 pop RAX;
             }");
         }
-        else static assert("Unsupported CPU");
     }
-    else static assert("Unsupported OS");
-
+    else
+    {
+        import core.atomic;
+        import core.thread;
+/+
+        auto t = Thread.getThis();
+        const uint id = cast(uint) t.id();
++/
+        const shared uint id = GetThreadId();
+        uint expected = 0;
+            
+        while((*lockPtr) != id && cas((cast(shared)lockPtr), 0, id))
+        {
+            expected = 0;
+        ` ~ __mmPause ~ `
+        }
     }
-`;
+    
+}`;
 }
 
 string UnlockQueue(string lock)
@@ -105,7 +110,7 @@ struct CopyQueueEntry
 __gshared align(16) CopyQueueEntry[256] copyQueue;
 __gshared align(16) size_t copyQueueCount;
 __gshared align(16) size_t workDoneCount;
-__gshared align(16) uint copyQueueLocked;
+shared align(16) uint copyQueueLocked;
 
 static immutable string __mmPause = "asm nothrow pure { rep; nop; }";
 import core.stdc.stdio;
@@ -177,10 +182,17 @@ extern (C) void* copyLoop(void* arg)
 void initWorkerThread()
 {
     copyQueueLocked = 0;
-
-    pthread_t copyThread;
-    pthread_create(&copyThread, null, &copyLoop, null);
-
+    version (linux)
+    {
+        import core.sys.posix.pthread;
+        pthread_t copyThread;
+        pthread_create(&copyThread, null, &copyLoop, null);
+    }
+    else
+    {
+        import core.thread;
+        auto copyThread = new Thread(&copyLoop).start();
+    }
 
 }
 // enqueueMalloc()
@@ -223,13 +235,15 @@ do {
 void main()
 {
     assert(!copyQueueLocked);
-    printf("GetThreadId: %d\n", GetThreadId());
+    uint my_thread_id = GetThreadId();
+
+    printf("GetThreadId: %d\n", my_thread_id);
     initWorkerThread();
-    uint owner;
     printf("copyQueueLocked: %d\n", copyQueueLocked);
-    mixin(LockQueue("copyQueueLocked", "owner"));
+    mixin(LockQueue("copyQueueLocked"));
     // we've got the lock which means we're the owner
-    printf("My thread Id:%d\n", owner);
+    assert(cast(uint)copyQueueLocked == my_thread_id);
+    printf("copyQueueLocked: %d\n", cast(uint)copyQueueLocked);
     mixin(UnlockQueue("copyQueueLocked"));
     long source = 22;
     long dest = 0;
