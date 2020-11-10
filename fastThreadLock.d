@@ -5,7 +5,7 @@ version (linux)
 {
     version (X86_64)
     {
-//        alias x86_64_asm_linux_lock = void;
+        alias x86_64_asm_linux_lock = void;
     }
 }
 
