@@ -1,4 +1,4 @@
-module thread_utils.Thread_utils;
+module thread_utils.thread_utils;
 
 /**
   Splits a string into at most ($D n) nearly equal parts
